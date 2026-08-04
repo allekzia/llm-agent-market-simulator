@@ -2,6 +2,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
 from core.demand_model import FirmState, MarketParams, compute_market_shares, compute_round
 
 
@@ -58,6 +59,44 @@ def test_marketing_spend_increases_share():
     share_no = compute_market_shares(firms_no_marketing, params)[0]
     share_with = compute_market_shares(firms_with_marketing, params)[0]
     assert share_with > share_no
+
+
+def test_marketing_spend_is_charged_as_a_real_cost():
+    """
+    Regression test for a real bug: an LLM agent set an extreme marketing
+    budget in round 0 and captured almost the entire market for nearly
+    free, since marketing boosted share disproportionately to its cost.
+    Confirms marketing now meaningfully helps but never gives a runaway,
+    unbounded profit advantage.
+    """
+    params = make_params()
+    firms_no_marketing = [FirmState("A", price=5.0, marginal_cost=2.0, marketing=0.0),
+                           FirmState("B", price=5.0, marginal_cost=2.0, marketing=0.0)]
+    firms_with_marketing = [FirmState("A", price=5.0, marginal_cost=2.0, marketing=params.max_marketing),
+                             FirmState("B", price=5.0, marginal_cost=2.0, marketing=0.0)]
+    profit_no_marketing = compute_round(firms_no_marketing, params)["A"]["profit"]
+    profit_with_marketing = compute_round(firms_with_marketing, params)["A"]["profit"]
+    # marketing should help (it is not useless)...
+    assert profit_with_marketing > profit_no_marketing
+    # ...but never turn into a runaway, near-monopoly windfall for a flat cost
+    assert profit_with_marketing < profit_no_marketing * 5
+
+
+def test_marketing_spend_above_cap_has_no_extra_effect():
+    """
+    A firm proposing marketing far above max_marketing should be treated
+    identically to one proposing exactly max_marketing, confirming the
+    cap is actually enforced centrally and cannot be bypassed by any
+    agent, however large a number it proposes.
+    """
+    params = make_params()
+    firms_at_cap = [FirmState("A", price=5.0, marginal_cost=2.0, marketing=params.max_marketing),
+                    FirmState("B", price=5.0, marginal_cost=2.0, marketing=0.0)]
+    firms_way_above_cap = [FirmState("A", price=5.0, marginal_cost=2.0, marketing=100000.0),
+                            FirmState("B", price=5.0, marginal_cost=2.0, marketing=0.0)]
+    profit_at_cap = compute_round(firms_at_cap, params)["A"]["profit"]
+    profit_way_above = compute_round(firms_way_above_cap, params)["A"]["profit"]
+    assert profit_at_cap == pytest.approx(profit_way_above)
 
 
 def test_profit_zero_at_marginal_cost_pricing():
