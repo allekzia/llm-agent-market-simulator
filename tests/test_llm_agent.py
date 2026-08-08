@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import pytest
 from core.agents.base import MarketObservation
-from core.agents.llm_agent import build_prompt, parse_llm_response, LLMAgent
+from core.agents.llm_agent import build_prompt, build_system_prompt, parse_llm_response, LLMAgent
 
 
 def make_obs(**overrides):
@@ -157,3 +157,118 @@ def test_decide_handles_api_exception_not_just_bad_json():
     agent = LLMAgent(name="A", call_fn=crashing_call_fn, api_key="unused", max_retries=2)
     decision = agent.decide(make_obs(own_marginal_cost=2.00))
     assert decision.price > 0  # fell back safely instead of raising
+
+
+# ---- 429 rate limit backoff, using a mocked requests.post ----
+
+def test_default_call_fn_recovers_after_one_429(monkeypatch):
+    import time
+    from core.agents.llm_agent import default_groq_call_fn
+
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None, headers=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.headers = headers or {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, headers, json, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return FakeResponse(429, headers={"Retry-After": "0"})
+        return FakeResponse(200, payload={"choices": [{"message": {"content": "ok response"}}]})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(time, "sleep", lambda s: None)  # skip the real wait during the test
+
+    result = default_groq_call_fn("sys", "user", "model", "key")
+    assert result == "ok response"
+    assert calls["count"] == 2
+
+
+def test_default_call_fn_raises_after_repeated_429s(monkeypatch):
+    import time
+    from core.agents.llm_agent import default_groq_call_fn
+
+    class AlwaysRateLimited:
+        status_code = 429
+        headers = {"Retry-After": "0"}
+
+        def raise_for_status(self):
+            raise RuntimeError("HTTP 429")
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr("requests.post", lambda *a, **k: AlwaysRateLimited())
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    with pytest.raises(RuntimeError):
+        default_groq_call_fn("sys", "user", "model", "key")
+
+
+# ---- messaging channel (stage 3) ----
+
+def test_system_prompt_omits_message_schema_when_messaging_disabled():
+    prompt = build_system_prompt(allow_messaging=False)
+    assert "message" not in prompt.lower()
+
+
+def test_system_prompt_includes_message_schema_when_messaging_enabled():
+    prompt = build_system_prompt(allow_messaging=True)
+    assert '"message"' in prompt
+
+
+def test_prompt_includes_visible_messages_when_present():
+    prompt = build_prompt(make_obs(visible_messages={"B": "Staying steady this round."}))
+    assert "Staying steady this round." in prompt
+    assert "B" in prompt
+
+
+def test_prompt_omits_message_section_when_no_messages_present():
+    prompt = build_prompt(make_obs(visible_messages={}))
+    assert "Messages from other businesses" not in prompt
+
+
+def test_parse_extracts_message_field():
+    result = parse_llm_response(
+        '{"price": 3.0, "marketing": 0.0, "rationale": "ok", "message": "holding steady"}'
+    )
+    assert result["message"] == "holding steady"
+
+
+def test_parse_defaults_message_to_empty_string_when_absent():
+    result = parse_llm_response('{"price": 3.0, "rationale": "ok"}')
+    assert result["message"] == ""
+
+
+def test_decide_includes_message_when_messaging_enabled():
+    def fake_call_fn(system_prompt, user_prompt, model, api_key):
+        return '{"price": 2.80, "rationale": "steady", "message": "planning to hold price"}'
+
+    agent = LLMAgent(name="A", call_fn=fake_call_fn, api_key="unused", allow_messaging=True)
+    decision = agent.decide(make_obs())
+    assert decision.message == "planning to hold price"
+
+
+def test_decide_ignores_message_when_messaging_disabled():
+    """
+    Even if a model returns a message field unprompted, an agent with
+    messaging disabled should never pass it through. This keeps the two
+    experiment conditions (with vs without communication) genuinely
+    clean and comparable.
+    """
+    def fake_call_fn(system_prompt, user_prompt, model, api_key):
+        return '{"price": 2.80, "rationale": "steady", "message": "should not appear"}'
+
+    agent = LLMAgent(name="A", call_fn=fake_call_fn, api_key="unused", allow_messaging=False)
+    decision = agent.decide(make_obs())
+    assert decision.message == ""
