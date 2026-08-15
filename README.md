@@ -38,13 +38,22 @@ market_sim/
 │   ├── environment.py          # round loop connecting agents to the market
 │   └── agents/
 │       ├── base.py             # Agent interface (Observation to Decision)
-│       └── rule_agent.py       # baseline strategies: cost-plus, undercut, noisy-match
+│       ├── rule_agent.py       # baseline strategies: cost-plus, undercut, noisy-match
+│       └── llm_agent.py        # LLM-backed agent, messaging-capable
 ├── experiments/
-│   └── stage1_baseline_runner.py  # scenario runner + CSV logging
+│   ├── stage1_baseline_runner.py
+│   ├── stage2_llm_vs_baseline_runner.py
+│   ├── stage3_conditions_runner.py
+│   └── stage3_repeats_runner.py
 ├── analysis/
-│   └── plot_baseline.py        # convergence visualization
+│   ├── plot_baseline.py
+│   ├── plot_stage3.py
+│   └── stage3_stats.py         # permutation test on repeated-run results
+├── dashboard/
+│   ├── app.py                  # Streamlit dashboard: live sim + recorded results
+│   └── theme.py                # design tokens and CSS, kept separate from app logic
 ├── tests/
-│   └── test_demand_model.py    # 10 tests validating economic sanity
+│   └── (one test file per module above)
 └── requirements.txt
 ```
 
@@ -207,12 +216,47 @@ setting with one random seed, and should not be read as evidence of any
 real pattern yet. Confirming whether this holds requires the repeated,
 seeded experiments planned for later stages.
 
+## Stage 4: interactive dashboard
+
+A Streamlit dashboard (`dashboard/app.py`) provides three views: a live,
+instant rule-based simulation (no API key needed, since it's pure local
+computation), a browser for already-recorded LLM experiment results
+(reads the real CSV logs from stages 2 and 3), and a statistics view
+comparing the isolated and connected conditions.
+
+**Visual design** lives in `dashboard/theme.py`, kept separate from the
+app logic: a deep indigo-to-violet gradient background with frosted
+glass cards, matching a specific visual reference. Cyan and violet are
+reserved specifically to mean the isolated and connected conditions
+everywhere in the app, charts, header stats, badges, not used
+decoratively for anything else. The header's live stats (average
+markup, run counts) are computed from the real CSV data on load, not
+hardcoded, so they can't silently go stale. A dark Streamlit theme
+(`.streamlit/config.toml`) keeps native widgets consistent with the
+custom styling. 5 tests (`tests/test_dashboard_theme.py`) cover the
+color-assignment logic directly.
+
+**Deliberate design decision: the dashboard never makes a live LLM API
+call.** All LLM-related results shown are ones already collected and
+saved by the stage 2/3 runner scripts. This matters once the dashboard
+is deployed publicly in a later stage: a public page able to trigger
+real, billed API calls on a personal key, or able to retrigger the same
+rate limits worked through in stage 3, would be a real risk, not a
+hypothetical one. Two tests (`tests/test_dashboard.py`) use Streamlit's
+own headless testing tool to confirm the app loads and its live
+simulation runs without error, without needing a real browser.
+
+To run it locally:
+```bash
+streamlit run dashboard/app.py
+```
+
 ## Roadmap
 
 - [x] **Stage 1**: Deterministic demand model, rule-based agents, validated convergence behavior
 - [x] **Stage 2**: LLM-backed agent, first live run against rule-based baselines, one environment bug found and fixed
 - [ ] **Stage 3** (in progress): Multi-LLM-agent markets, information-condition experiments. Isolated condition complete and replicated (16 seeded runs, two batches); connected condition pending a clean, larger rerun
-- [ ] **Stage 4**: Streamlit dashboard to configure and visualize experiments live
+- [x] **Stage 4**: Interactive dashboard for live simulation and browsing recorded results
 - [ ] **Stage 5**: Dockerized deployment, CI (GitHub Actions), cost guardrails for public demo
 - [ ] **Stage 6**: Full experiment suite, seeded runs across conditions, collusion-proxy metrics
 - [ ] **Stage 7**: Write-up of findings, limitations, final polish
@@ -224,6 +268,7 @@ pip install -r requirements.txt
 python -m pytest tests/ -v                    # run the validation suite
 python experiments/stage1_baseline_runner.py   # run the three baseline scenarios
 python analysis/plot_baseline.py               # generate the convergence plot
+streamlit run dashboard/app.py                 # launch the interactive dashboard
 ```
 
 ## Limitations (honest, as of Stage 3, in progress)
