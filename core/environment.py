@@ -16,15 +16,18 @@ class MarketEnvironment:
         params: MarketParams,
         marginal_costs: dict[str, float],
         full_visibility: bool = True,
+        communication_enabled: bool = False,
         seed: int | None = None,
     ):
         self.agents = agents
         self.params = params
         self.marginal_costs = marginal_costs
         self.full_visibility = full_visibility
+        self.communication_enabled = communication_enabled
         self.round_number = 0
         # per-agent history of round result dicts, oldest first
         self.history: dict[str, list[dict]] = {a.name: [] for a in agents}
+        self.last_messages: dict[str, str] = {}  # agent name -> message from the round just finished
         self.log: list[dict] = []  # flat log of every round, for analysis/export
         if seed is not None:
             import random
@@ -44,6 +47,13 @@ class MarketEnvironment:
                 if other_hist:
                     visible_prices[other.name] = other_hist[-1]["price"]
 
+        visible_messages = {}
+        if self.communication_enabled and self.round_number > 0:
+            visible_messages = {
+                name: msg for name, msg in self.last_messages.items()
+                if name != agent.name and msg
+            }
+
         return MarketObservation(
             round_number=self.round_number,
             own_name=agent.name,
@@ -51,6 +61,7 @@ class MarketEnvironment:
             own_last_profit=last_profit,
             own_marginal_cost=self.marginal_costs[agent.name],
             visible_competitor_prices=visible_prices,
+            visible_messages=visible_messages,
             history=own_hist,
         )
 
@@ -76,8 +87,12 @@ class MarketEnvironment:
         for name, result in results.items():
             result["round"] = self.round_number
             result["rationale"] = decisions[name].rationale
+            result["message"] = decisions[name].message
             self.history[name].append(result)
             self.log.append({"agent": name, **result})
+
+        if self.communication_enabled:
+            self.last_messages = {name: d.message for name, d in decisions.items()}
 
         self.round_number += 1
         return results
