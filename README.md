@@ -33,6 +33,14 @@ rather than just a demo.
 
 ```
 market_sim/
+├── Dockerfile
+├── .dockerignore
+├── .github/
+│   └── workflows/
+│       ├── tests.yml             # CI: runs the full test suite on push/PR
+│       └── docker-build.yml      # CI: builds and smoke-tests the Docker image
+├── .streamlit/
+│   └── config.toml              # dark theme config for the dashboard
 ├── core/
 │   ├── demand_model.py         # deterministic multinomial logit demand + profit
 │   ├── environment.py          # round loop connecting agents to the market
@@ -251,13 +259,88 @@ To run it locally:
 streamlit run dashboard/app.py
 ```
 
+## Stage 5: Docker, CI, and deployment
+
+**Docker.** A `Dockerfile` packages the dashboard and its dependencies
+into a self-contained image: anyone with Docker can run it identically,
+regardless of what's installed on their own machine. No API key is
+baked into the image; the dashboard never needs one, see the stage 4
+design decision above.
+
+**The Docker image is built and smoke-tested automatically by CI**
+(`.github/workflows/docker-build.yml`), on GitHub's own free runners,
+rather than requiring Docker installed locally. This matters
+practically: Docker Desktop can require a paid license depending on the
+machine or organization, so relying on it for local verification isn't
+a safe assumption to build a portfolio project around. The workflow
+builds the image, starts the container, and polls Streamlit's built-in
+health endpoint (`/_stcore/health`) until it responds or times out,
+confirming the image doesn't just build, it actually starts and serves
+traffic correctly.
+
+**CI.** `.github/workflows/tests.yml` runs the full test suite
+automatically on every push to `main` and every pull request, so a
+broken change is caught before it merges, not after. One real gotcha
+worth documenting: YAML interprets an unquoted `on` key as the boolean
+`true` rather than the string "on" (a YAML 1.1 quirk with
+`on`/`off`/`yes`/`no`). GitHub's parser handles this specific case
+correctly regardless, but the key is quoted (`"on":`) in both workflow
+files to remove the ambiguity entirely, caught by validating each file
+with a real YAML parser before trusting it.
+
+**A real bug caught while preparing this stage:** `.gitignore` was
+still excluding `experiments/results/*.csv` from stage 1, when those
+files were just scratch output. Left as-is, the dashboard's recorded
+results and stats tabs would have silently shown no data once
+deployed, since the CSVs they depend on would never have been
+committed. Fixed before it caused a confusing, hard-to-diagnose empty
+deployment.
+
+**Deployment target: Streamlit Community Cloud.** The original plan
+considered a Docker-based hosting platform, specifically to exercise
+the Docker skill in the live deployment path. That platform's free
+tier changed to require a paid plan partway through this stage (a
+real, recent product change, not a workaround-able restriction), so
+Docker was kept as a demonstrated local/CI skill instead, and the
+actual public deployment uses Streamlit Community Cloud, which remains
+genuinely free for public apps and deploys directly from this GitHub
+repo with no Docker required on their end at all.
+
+The Docker work wasn't wasted: `Dockerfile` and its CI validation
+(`.github/workflows/docker-build.yml`) stay in the project as a real,
+demonstrated skill, buildable and runnable locally with Docker Desktop
+or Podman, and verified automatically on every push, they're just not
+the live public deployment path.
+
+To deploy on Streamlit Community Cloud: go to
+[share.streamlit.io](https://share.streamlit.io), connect the GitHub
+account, choose this repo, set the main file path to
+`dashboard/app.py`, and deploy. No config file needed beyond the
+existing `requirements.txt`.
+
+Cost/abuse guardrails: the deployed dashboard makes zero live API
+calls (inherited from stage 4's design), so there's no key to leak and
+no usage cost that a visitor could run up.
+
+To run the Docker image locally, if you have Docker Desktop or a
+compatible tool installed
+([Podman](https://podman.io) is a free, Docker-compatible alternative
+that uses the same commands):
+```bash
+docker build -t market-sim .
+docker run -p 7860:7860 market-sim
+```
+Then open `http://localhost:7860`. This step is optional, not required
+to trust the image works: CI already builds and smoke-tests it on
+every push.
+
 ## Roadmap
 
 - [x] **Stage 1**: Deterministic demand model, rule-based agents, validated convergence behavior
 - [x] **Stage 2**: LLM-backed agent, first live run against rule-based baselines, one environment bug found and fixed
 - [ ] **Stage 3** (in progress): Multi-LLM-agent markets, information-condition experiments. Isolated condition complete and replicated (16 seeded runs, two batches); connected condition pending a clean, larger rerun
 - [x] **Stage 4**: Interactive dashboard for live simulation and browsing recorded results
-- [ ] **Stage 5**: Dockerized deployment, CI (GitHub Actions), cost guardrails for public demo
+- [x] **Stage 5**: Dockerized deployment, CI, cost guardrails
 - [ ] **Stage 6**: Full experiment suite, seeded runs across conditions, collusion-proxy metrics
 - [ ] **Stage 7**: Write-up of findings, limitations, final polish
 
