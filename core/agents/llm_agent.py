@@ -184,7 +184,23 @@ def default_groq_call_fn(system_prompt: str, user_prompt: str, model: str, api_k
                     {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.7,
-                "max_tokens": 200,
+                "max_tokens": 800,
+                # gpt-oss models are reasoning models: they spend tokens
+                # on an internal chain-of-thought before writing the
+                # actual answer, and that spend counts against
+                # max_tokens whether or not the reasoning is returned to
+                # us. include_reasoning only controls what comes back in
+                # the response, it does NOT reduce how many tokens get
+                # spent thinking, which is why raising max_tokens alone
+                # wasn't enough: as the prompt grew each round (more
+                # history, more messages to react to), the model needed
+                # more reasoning tokens and kept exhausting the budget
+                # before ever writing content. reasoning_effort actively
+                # limits how much internal reasoning happens in the
+                # first place, attacking the real cause, not just hiding
+                # the symptom.
+                "include_reasoning": False,
+                "reasoning_effort": "low",
             },
             timeout=30,
         )
@@ -203,7 +219,12 @@ class LLMAgent(Agent):
     def __init__(
         self,
         name: str,
-        model: str = "llama-3.3-70b-versatile",
+        # Groq deprecated llama-3.3-70b-versatile and llama-3.1-8b-instant
+        # (confirmed via their own deprecations page, mid-project). This
+        # is their current recommended smaller replacement; a 404 "model
+        # not found" error on a previously-working setup is the usual
+        # symptom if this ever needs updating again.
+        model: str = "openai/gpt-oss-20b",
         api_key: str | None = None,
         call_fn=None,
         max_retries: int = 3,
