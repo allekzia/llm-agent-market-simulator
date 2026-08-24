@@ -44,11 +44,13 @@ from core.demand_model import MarketParams
 from core.environment import MarketEnvironment
 from core.agents.llm_agent import LLMAgent, default_groq_call_fn
 
-# Edit this if the current model is hitting quota limits on Groq's free
-# tier. Smaller/faster models like "llama-3.1-8b-instant" often have much
-# more generous free limits than larger ones like "llama-3.3-70b-versatile".
-# Check console.groq.com for your account's actual current limits.
-MODEL = "llama-3.3-70b-versatile"
+# Edit this if the current model is hitting quota limits, or has been
+# deprecated (a 404 "model not found" error is the usual symptom of
+# deprecation, not a quota problem, check console.groq.com/docs/models
+# for the current list). This constant is actually passed into every
+# LLMAgent below, previously it was defined here but never wired
+# through, so editing it silently did nothing.
+MODEL = "openai/gpt-oss-20b"
 
 
 def make_throttled_call_fn(delay_seconds: float):
@@ -62,9 +64,9 @@ def make_throttled_call_fn(delay_seconds: float):
 def run_condition(name, api_key, full_visibility, communication_enabled, n_rounds=10, seed=42):
     call_fn = make_throttled_call_fn(delay_seconds=3.5)
     agents = [
-        LLMAgent(name="Agent_1", api_key=api_key, call_fn=call_fn, allow_messaging=communication_enabled),
-        LLMAgent(name="Agent_2", api_key=api_key, call_fn=call_fn, allow_messaging=communication_enabled),
-        LLMAgent(name="Agent_3", api_key=api_key, call_fn=call_fn, allow_messaging=communication_enabled),
+        LLMAgent(name="Agent_1", model=MODEL, api_key=api_key, call_fn=call_fn, allow_messaging=communication_enabled),
+        LLMAgent(name="Agent_2", model=MODEL, api_key=api_key, call_fn=call_fn, allow_messaging=communication_enabled),
+        LLMAgent(name="Agent_3", model=MODEL, api_key=api_key, call_fn=call_fn, allow_messaging=communication_enabled),
     ]
     marginal_costs = {a.name: 2.0 for a in agents}
     params = MarketParams(price_sensitivity=1.0, marketing_sensitivity=0.3, market_size=1000.0)
