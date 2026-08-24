@@ -215,6 +215,47 @@ def test_default_call_fn_raises_after_repeated_429s(monkeypatch):
         default_groq_call_fn("sys", "user", "model", "key")
 
 
+def test_default_call_fn_limits_reasoning_and_uses_a_safe_token_budget(monkeypatch):
+    """
+    Regression test for a real failure: gpt-oss models are reasoning
+    models that spend tokens on an internal chain-of-thought before
+    writing an answer, and that spend counts against max_tokens whether
+    or not the reasoning is returned to us. A first fix attempt
+    (include_reasoning: false alone) was not enough, since it only
+    hides reasoning from the response, it doesn't reduce how many
+    tokens get spent generating it. As prompts grew each round, the
+    model kept exhausting the budget before ever writing content.
+    Confirms the request also caps reasoning effort directly, and uses
+    a token budget large enough to leave real room for an answer.
+    """
+    import time
+    from core.agents.llm_agent import default_groq_call_fn
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def fake_post(url, headers, json, timeout):
+        captured.update(json)
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    default_groq_call_fn("sys", "user", "model", "key")
+
+    assert captured["include_reasoning"] is False
+    assert captured["reasoning_effort"] == "low"
+    assert captured["max_tokens"] >= 700
+
+
 # ---- messaging channel (stage 3) ----
 
 def test_system_prompt_omits_message_schema_when_messaging_disabled():

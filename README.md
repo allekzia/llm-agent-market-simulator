@@ -12,10 +12,12 @@ the agents' *strategy* is LLM-driven. Varying what agents can see and
 whether they can communicate lets us measure how information conditions
 affect pricing behavior.
 
-> **Status: Stage 3 in progress.** Isolated LLM agent condition
-> replicated across two independent 8-seed batches (74.2% average
-> markup). Connected condition pending a clean, larger rerun.
-> See [Roadmap](#roadmap) below.
+> **Status: Stage 6 complete, a real finding.** Under a same-model,
+> contamination-filtered comparison (14 isolated vs 11 connected
+> runs), connected agents priced lower (17.2% vs 30.4% average markup,
+> p = 0.0004) and converged far more tightly to each other (p = 0.0003)
+> than isolated agents, the opposite of the tacit-collusion hypothesis
+> this project set out to test. See [Roadmap](#roadmap) below.
 
 ## Why this question matters
 
@@ -52,11 +54,15 @@ market_sim/
 │   ├── stage1_baseline_runner.py
 │   ├── stage2_llm_vs_baseline_runner.py
 │   ├── stage3_conditions_runner.py
-│   └── stage3_repeats_runner.py
+│   ├── stage3_repeats_runner.py
+│   ├── stage6_connected_completion_runner.py
+│   └── stage6_isolated_completion_runner.py
 ├── analysis/
 │   ├── plot_baseline.py
 │   ├── plot_stage3.py
-│   └── stage3_stats.py         # permutation test on repeated-run results
+│   ├── stage3_stats.py         # permutation test on repeated-run results
+│   ├── collusion_metrics.py    # price correlation and dispersion
+│   └── collusion_stats.py      # permutation test on collusion-proxy metrics
 ├── dashboard/
 │   ├── app.py                  # Streamlit dashboard: live sim + recorded results
 │   └── theme.py                # design tokens and CSS, kept separate from app logic
@@ -103,6 +109,14 @@ dynamics before any LLM strategy is introduced, the necessary baseline
 for everything that follows.
 
 ## Stage 3: multiple LLM agents, and comparing information conditions
+
+> **Note:** this stage's data was collected under
+> `llama-3.3-70b-versatile`, since deprecated by Groq. The isolated vs
+> connected comparison here should not be trusted as a finding, the
+> markup levels turned out to be highly model-dependent, see the Stage 6
+> section below for the valid, same-model comparison and the actual
+> finding. This section is kept as the honest record of how that was
+> discovered.
 
 The Agent interface was extended with an optional messaging channel:
 agents can now see a short note from other agents' previous round, and
@@ -334,14 +348,163 @@ Then open `http://localhost:7860`. This step is optional, not required
 to trust the image works: CI already builds and smoke-tests it on
 every push.
 
+## Stage 6: closing the sample gap, and a real collusion-proxy metric
+
+**The sample-size problem going into this stage:** isolated has 16
+independent, replicated runs. Connected has only 2 clean data points.
+`experiments/stage6_connected_completion_runner.py` runs 14 fresh,
+previously-unused seeds for the connected condition specifically, to
+bring it up to a comparable sample size. It deliberately avoids reusing
+any seed value already present as a result file, reusing a seed would
+silently overwrite that run's data rather than adding to it, exactly
+the kind of quiet data-loss bug worth designing around up front rather
+than discovering after the fact.
+
+**A metric beyond average markup.** Average price alone doesn't
+directly measure collusion, agents could independently land on similar
+high prices without ever moving together. `analysis/collusion_metrics.py`
+adds two metrics computed from each run's actual round-by-round price
+data: **price correlation** (how closely each pair of agents' prices
+move together over time, a more direct alignment signal than similar
+average levels) and **price dispersion** (how spread out final prices
+are across agents in a run, lower means more converged). Both are
+covered by 9 tests using hand-constructed data with known correct
+answers (perfectly correlated series score 1.0, perfectly opposed
+series score -1.0, etc.), so the metrics themselves are trustworthy
+before being pointed at real experiment data.
+
+**`analysis/collusion_stats.py`** scans every real per-seed CSV on disk
+and runs the same permutation test used for markup in
+`stage3_stats.py` (reused directly, not duplicated) on both new
+metrics, so the correlation and dispersion comparisons get the same
+statistical rigor as the original markup comparison.
+
+**Status: complete. Real, same-model, contamination-filtered results
+below.** The final clean batch: 14 isolated runs (0% fallback, a
+completely clean batch) and 11 connected runs (11 of 14 attempted
+seeds completed clean; 3 were excluded automatically by the
+contamination filter after hitting the same daily quota limit late in
+the batch, a repeatable pattern across two separate attempts now,
+worth knowing this API key reliably supports roughly 11 clean
+multi-agent seeds per day before the ceiling).
+
+**Two real problems surfaced on the first live attempt at this batch,
+both fixed:** Groq deprecated the `llama-3.3-70b-versatile` model used
+since stage 2 (confirmed via their own deprecations page), causing
+every single call to fail with HTTP 404 rather than the 429 rate-limit
+errors seen before, a different failure mode the existing warning
+system still caught correctly and immediately. Fixed by switching to
+`openai/gpt-oss-20b`, Groq's current recommended smaller replacement.
+
+While fixing this, a second, quieter bug surfaced: `stage3_conditions_runner.py`
+had a `MODEL` constant at the top with a comment inviting it to be
+edited if needed, but it was never actually passed into the `LLMAgent`
+instances below it, so editing it would have silently done nothing.
+The real default was buried inside `llm_agent.py` itself. Fixed by
+wiring the constant through properly, so it now does what its own
+comment always claimed it did.
+
+**A third issue appeared on the next attempt, after the model switch:**
+`openai/gpt-oss-20b` is a reasoning model, it spends tokens on an
+internal chain-of-thought before writing its actual answer. With the
+original `max_tokens: 200` budget, generation was getting cut off
+entirely during that reasoning phase, before any real content was ever
+written, producing a technically successful API response with
+completely empty content. A first fix (`include_reasoning: false` plus
+a higher token ceiling) reduced but didn't eliminate the problem: real
+data started coming through, but failures got progressively worse
+round over round. The reason was subtle: `include_reasoning` only
+controls what Groq *returns* in the response, it doesn't reduce how
+many tokens the model actually *spends* thinking, and that spend still
+counts against `max_tokens`. As the prompt grew each round (more
+history to react to, approaching the 5-round window cap), the model
+needed more reasoning tokens and kept exhausting the budget before
+ever reaching the answer. Properly fixed by adding
+`reasoning_effort: "low"`, which caps how much internal reasoning
+happens in the first place, combined with raising `max_tokens` to 800
+for real headroom either way.
+
+**A first live attempt at the full batch, with all three fixes in
+place, surfaced two further, real data-quality issues, both now
+fixed:**
+
+**Contaminated seeds were silently entering the statistics.** Of 14
+fresh seeds run, 11 completed with zero API failures, but 3 (seeds
+512, 513, 514) hit the same cumulative daily quota issue from earlier
+in stage 3, with 10%, 77%, and 83% of their decisions falling back to
+default prices respectively. `regenerate_summary()` had no way to know
+this and would have blended contaminated seeds in with clean ones. It
+now checks each seed's `rationale` column for fallback markers and
+excludes any seed above a 5% fallback threshold entirely, reporting
+exactly which seeds were dropped and why, rather than letting a
+partially-failed run quietly corrupt the comparison.
+
+**A more fundamental issue: the model change broke direct comparability.**
+The connected batch was collected under `openai/gpt-oss-20b` (the
+replacement for the deprecated `llama-3.3-70b-versatile` used for all
+16 original isolated runs). The new connected data showed dramatically
+different markup levels (12% to 30%) than anything seen with the old
+model (which ranged 62.5% to 100% across isolated and connected alike).
+That difference could reflect the isolated-vs-connected conditions, or
+it could simply be two different models behaving differently, there is
+no way to tell without a same-model comparison. `regenerate_summary()`
+gained a `min_seed` filter so a summary can be rebuilt containing only
+seeds collected under the current model on both sides, and
+`experiments/stage6_isolated_completion_runner.py` collects a fresh
+14-seed isolated batch under the current model specifically to enable
+that fair comparison, using entirely new seed values so neither the
+original llama-based isolated data nor the new connected data is ever
+overwritten. 5 tests cover the contamination filtering and seed-based
+exclusion directly, and 1 covers the reasoning-output request settings.
+
+### The findings
+
+Using only the 14 clean isolated runs and 11 clean connected runs
+collected under the same current model, compared with the permutation
+test from `stage3_stats.py` and the collusion-proxy metrics from
+`collusion_metrics.py`:
+
+| Metric | Isolated | Connected | Difference | p-value |
+|---|---|---|---|---|
+| Average price (markup over $2.00 cost) | $2.61 (30.4%) | $2.34 (17.2%) | Isolated higher | **0.0004** |
+| Price correlation (do agents move together over time) | 0.246 | 0.185 | No real difference | 0.625 |
+| Price dispersion (how spread out final prices are) | 0.225 | 0.038 | Connected far tighter | **0.0003** |
+
+**This is the opposite of what the tacit-collusion hypothesis
+predicts.** If visibility and messaging caused agents to quietly settle
+on a comfortable, elevated price together, connected agents should
+have priced *higher* than isolated ones, not lower. Instead, connected
+agents priced meaningfully lower, and did so far more consistently
+with each other (final prices landing almost on top of one another,
+dispersion of 0.038 versus 0.225), while showing no more tendency to
+move together round over round than isolated agents did.
+
+The more plausible read: visibility gives an agent something real to
+react to, competitors' actual prices, and reacting to that pulls prices
+down toward a more competitive level and keeps agents in a tight band
+around each other. Isolated agents, with nothing to anchor against,
+drift further and more independently, landing both higher and more
+scattered.
+
+**Caveats that matter:** only one underlying model was tested
+(`openai/gpt-oss-20b`), so this cannot be generalized to LLMs as a
+category, a different model could behave completely differently, this
+project's stage 3 history is itself a demonstration of that. Three
+metrics were compared without correcting for multiple comparisons,
+though two of the three are significant by a wide enough margin
+(p < 0.001) that this is unlikely to be an artifact of that alone. And
+this remains one specific, simplified market configuration (a
+multinomial logit demand model, 10 rounds, 3 agents), not a claim about
+real-world pricing behavior.
+
 ## Roadmap
 
 - [x] **Stage 1**: Deterministic demand model, rule-based agents, validated convergence behavior
 - [x] **Stage 2**: LLM-backed agent, first live run against rule-based baselines, one environment bug found and fixed
-- [ ] **Stage 3** (in progress): Multi-LLM-agent markets, information-condition experiments. Isolated condition complete and replicated (16 seeded runs, two batches); connected condition pending a clean, larger rerun
+- [ ] **Stage 3** (superseded by Stage 6): Original multi-agent experiments used a model since deprecated by Groq; see Stage 6 for the valid, same-model comparison
 - [x] **Stage 4**: Interactive dashboard for live simulation and browsing recorded results
 - [x] **Stage 5**: Dockerized deployment, CI, cost guardrails
-- [ ] **Stage 6**: Full experiment suite, seeded runs across conditions, collusion-proxy metrics
+- [x] **Stage 6**: Same-model isolated vs connected comparison complete (14 vs 11 clean runs). Finding: connected agents priced lower and converged more tightly than isolated agents, opposite of the tacit-collusion hypothesis
 - [ ] **Stage 7**: Write-up of findings, limitations, final polish
 
 ## Running it
