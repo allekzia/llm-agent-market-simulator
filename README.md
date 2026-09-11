@@ -12,12 +12,35 @@ the agents' *strategy* is LLM-driven. Varying what agents can see and
 whether they can communicate lets us measure how information conditions
 affect pricing behavior.
 
-> **Status: Stage 6 complete, a real finding.** Under a same-model,
-> contamination-filtered comparison (14 isolated vs 11 connected
-> runs), connected agents priced lower (17.2% vs 30.4% average markup,
-> p = 0.0004) and converged far more tightly to each other (p = 0.0003)
-> than isolated agents, the opposite of the tacit-collusion hypothesis
-> this project set out to test. See [Roadmap](#roadmap) below.
+> **Status: complete.** All 7 stages done, real finding below, live
+> dashboard deployed. See [Roadmap](#roadmap) for the full stage
+> breakdown.
+
+## Key finding, in 30 seconds
+
+Three LLM agents priced a simulated market under two conditions:
+**isolated** (no visibility into competitors, no communication) and
+**connected** (full visibility, optional messaging). If tacit collusion
+were happening, connected agents should settle on a *higher*, shared
+price. Instead:
+
+| | Isolated | Connected | p-value |
+|---|---|---|---|
+| Average markup | 30.4% | **17.2%** | 0.0004 |
+| Price spread across agents | wide (0.225) | **tight (0.038)** | 0.0003 |
+
+Connected agents priced **lower and more uniformly**, not higher and
+aligned, the opposite of the collusion hypothesis. The likely
+explanation: visibility gives agents something real to react to, which
+pulls prices toward competition, not away from it. Full methodology,
+caveats, and how this finding was reached (including two false leads
+that didn't survive more data) are in [Stage 6](#stage-6-closing-the-sample-gap-and-a-real-collusion-proxy-metric).
+
+**Try it live:** [llm-agent-market-simulator.streamlit.app](https://llm-agent-market-simulator.streamlit.app/) · **Jump to:**
+[Architecture](#architecture) ·
+[Findings](#the-findings) ·
+[Limitations](#limitations) ·
+[What I'd do differently](#what-id-do-differently-with-more-time-or-budget)
 
 ## Why this question matters
 
@@ -107,6 +130,44 @@ marginal costs ($2.00):
 This confirms the simulation reproduces standard oligopoly pricing
 dynamics before any LLM strategy is introduced, the necessary baseline
 for everything that follows.
+
+## Stage 2: first LLM agent on the street
+
+An LLM-backed agent (`core/agents/llm_agent.py`) was added, implementing
+the same `Agent` interface as the rule-based agents from stage 1. It
+builds a prompt from its `MarketObservation`, calls an LLM (Groq's free
+tier), and parses the response into a price and marketing decision. The
+prompt is deliberately neutral: it never uses words like compete,
+undercut, cooperate, or collude, so any behavior that emerges reflects
+the agent's own reasoning, not an instruction. 18 new tests cover prompt
+content, response parsing (including malformed and markdown-wrapped
+responses), retries, and safe fallback behavior, all without needing a
+live API key.
+
+**A real bug was found and fixed during the first live test.** The LLM
+agent set an extreme marketing budget in its first round and captured
+almost the entire market for a trivial cost, since marketing spend
+increased market share but was not charged proportionally to the
+advantage it bought. This is a small example of reward hacking: an
+unmodeled free lever in the environment, found immediately by an agent
+optimizing for profit. The fix caps marketing spend to a scale
+comparable to price (`max_marketing` in `MarketParams`) and charges it as
+a real cost every round, enforced centrally in `compute_round` so no
+agent can bypass it. All stage 1 baseline results were re-verified
+unchanged after the fix, since they never used marketing.
+
+**Preliminary observation (single run, one seed, not yet a finding):**
+with the bug fixed, across 15 rounds the LLM agent's price never dropped
+below either rule-based competitor, settling in a $2.80 to $3.00 range
+(40% to 50% markup) against an Undercutter at 23.5% and a CostPlus agent
+at a fixed 30%. It also showed a repeating price cycle rather than
+settling at a stable value, climbing in small steps, overshooting past
+the point where profit actually peaked, then correcting back down,
+consistent with its limited memory window (it only sees its last 5
+rounds of history each round). This is one run at one temperature
+setting with one random seed, and should not be read as evidence of any
+real pattern yet. Confirming whether this holds requires the repeated,
+seeded experiments planned for later stages.
 
 ## Stage 3: multiple LLM agents, and comparing information conditions
 
@@ -199,44 +260,6 @@ repetition is a striking detail worth keeping, but it is two data
 points, not sixteen, and both share the same nominal seed, so it cannot
 yet be compared statistically against the isolated result. A clean,
 larger connected batch remains the immediate next step.
-
-## Stage 2: first LLM agent on the street
-
-An LLM-backed agent (`core/agents/llm_agent.py`) was added, implementing
-the same `Agent` interface as the rule-based agents from stage 1. It
-builds a prompt from its `MarketObservation`, calls an LLM (Groq's free
-tier), and parses the response into a price and marketing decision. The
-prompt is deliberately neutral: it never uses words like compete,
-undercut, cooperate, or collude, so any behavior that emerges reflects
-the agent's own reasoning, not an instruction. 18 new tests cover prompt
-content, response parsing (including malformed and markdown-wrapped
-responses), retries, and safe fallback behavior, all without needing a
-live API key.
-
-**A real bug was found and fixed during the first live test.** The LLM
-agent set an extreme marketing budget in its first round and captured
-almost the entire market for a trivial cost, since marketing spend
-increased market share but was not charged proportionally to the
-advantage it bought. This is a small example of reward hacking: an
-unmodeled free lever in the environment, found immediately by an agent
-optimizing for profit. The fix caps marketing spend to a scale
-comparable to price (`max_marketing` in `MarketParams`) and charges it as
-a real cost every round, enforced centrally in `compute_round` so no
-agent can bypass it. All stage 1 baseline results were re-verified
-unchanged after the fix, since they never used marketing.
-
-**Preliminary observation (single run, one seed, not yet a finding):**
-with the bug fixed, across 15 rounds the LLM agent's price never dropped
-below either rule-based competitor, settling in a $2.80 to $3.00 range
-(40% to 50% markup) against an Undercutter at 23.5% and a CostPlus agent
-at a fixed 30%. It also showed a repeating price cycle rather than
-settling at a stable value, climbing in small steps, overshooting past
-the point where profit actually peaked, then correcting back down,
-consistent with its limited memory window (it only sees its last 5
-rounds of history each round). This is one run at one temperature
-setting with one random seed, and should not be read as evidence of any
-real pattern yet. Confirming whether this holds requires the repeated,
-seeded experiments planned for later stages.
 
 ## Stage 4: interactive dashboard
 
@@ -501,11 +524,11 @@ real-world pricing behavior.
 
 - [x] **Stage 1**: Deterministic demand model, rule-based agents, validated convergence behavior
 - [x] **Stage 2**: LLM-backed agent, first live run against rule-based baselines, one environment bug found and fixed
-- [ ] **Stage 3** (superseded by Stage 6): Original multi-agent experiments used a model since deprecated by Groq; see Stage 6 for the valid, same-model comparison
+- [x] **Stage 3** (findings superseded by Stage 6): Messaging infrastructure and multi-agent environment complete; the original comparison used a model since deprecated by Groq, see Stage 6 for the valid, same-model result
 - [x] **Stage 4**: Interactive dashboard for live simulation and browsing recorded results
 - [x] **Stage 5**: Dockerized deployment, CI, cost guardrails
 - [x] **Stage 6**: Same-model isolated vs connected comparison complete (14 vs 11 clean runs). Finding: connected agents priced lower and converged more tightly than isolated agents, opposite of the tacit-collusion hypothesis
-- [ ] **Stage 7**: Write-up of findings, limitations, final polish
+- [x] **Stage 7**: Write-up of findings, limitations, and final polish
 
 ## Running it
 
@@ -517,30 +540,70 @@ python analysis/plot_baseline.py               # generate the convergence plot
 streamlit run dashboard/app.py                 # launch the interactive dashboard
 ```
 
-## Limitations (honest, as of Stage 3, in progress)
+## Limitations
 
-- The demand model is a simplified logit model, not calibrated to any real
-  market. It's a controllable testbed, not a prediction of real-world
-  prices.
-- Rule-based agents are intentionally simple; they exist to validate the
-  environment, not to represent realistic firm behavior.
-- The LLM agent only sees its last 5 rounds of history each round, not
-  its full history. Observed price cycling in earlier runs may be
-  partly caused by this limited memory window.
-- The environment's random seed does not control the LLM's own
-  sampling randomness (temperature 0.7), so repeated runs of the same
-  setup produce different outcomes.
-- All agents in a given run share the same underlying model. Any
-  alignment between them could reflect shared training behavior rather
-  than something specific to the market conditions; this is not yet
-  disentangled.
-- The connected (visibility + messaging) condition does not yet have a
-  clean batch of results; two separate attempts were both partially
-  contaminated by API rate limiting, though the one seed that completed
-  cleanly each time landed on the same result both times. The isolated
-  condition's 16-run result is trustworthy on its own, but no
-  isolated-versus-connected comparison can be made until a clean,
-  larger connected batch exists.
-- No claim about collusion or competitive behavior can be made yet,
-  that is the purpose of the larger, seeded experiment suite planned
-  for a later stage.
+- **Single model.** Every result here comes from one model
+  (`openai/gpt-oss-20b`). A different model could behave completely
+  differently, this project's own history is a demonstration of that:
+  switching models mid-project changed absolute markup levels so
+  dramatically (from a 74.2% isolated average under the old model to
+  30.4% under the current one) that the earlier isolated-vs-connected
+  comparison had to be discarded and rerun from scratch under matched
+  conditions. Nothing here generalizes to "LLMs" as a category.
+- **Modest sample size.** 14 isolated and 11 connected independent runs
+  is enough for the permutation tests to report real statistical
+  significance (p < 0.001 on two of three metrics), but it is not a
+  large sample by the standards of a formal study, and three metrics
+  were compared without correcting for multiple comparisons.
+- **A simplified market.** The demand model is a standard multinomial
+  logit model, not calibrated to any real market, and every run used
+  one specific configuration (3 firms, $2.00 marginal cost, 10 rounds).
+  This is a controllable testbed for studying agent behavior, not a
+  forecast of real-world pricing.
+- **Limited memory window.** Each LLM agent only sees its last 5 rounds
+  of history per round, not its full history. Some of the price
+  cycling seen in early single-run tests may be partly an artifact of
+  this rather than a pure market dynamic.
+- **All agents share one model per run.** Since every agent in a given
+  run is the same underlying model, any alignment between them could
+  in principle reflect shared training behavior rather than something
+  specific to the isolated/connected conditions. The price-correlation
+  metric (which showed no significant difference between conditions)
+  was partly an attempt to probe this, but it doesn't fully rule it
+  out.
+- **Not peer-reviewed research.** This is a personal project built to
+  produce one real, falsifiable, honestly-reported finding, not a
+  claim about how LLM agents behave in real markets. Treat it as a
+  demonstration of a research method, not a conclusion to cite.
+
+## What I'd do differently, with more time or budget
+
+- **Test more than one model.** The single biggest limitation here.
+  Running the same isolated/connected comparison across 3 to 4
+  different models (a mix of providers and sizes) would show whether
+  "connected agents price lower" is a general pattern or specific to
+  this one model's training.
+- **Use a paid API tier for the final experiment batch.** A large share
+  of the actual engineering time in stages 3 and 6 went into working
+  around free-tier rate limits and daily quotas (throttling, backoff,
+  contamination filtering, resilient batch runners). That
+  infrastructure was worth building and is genuinely reusable, but a
+  small paid budget for the final confirmatory run would have saved
+  real time and allowed a larger sample size.
+- **Add a third condition.** Right now "connected" bundles two things
+  together, visibility into competitor prices, and the ability to
+  message. Splitting these into separate conditions (visibility only,
+  messaging only, both) would show which one is actually doing the
+  work, right now that's conflated.
+- **Track token costs explicitly.** The project deliberately avoided
+  live LLM calls from the public dashboard to control cost, but the
+  research runs themselves never logged token usage or estimated cost
+  per experiment, worth adding for anyone trying to reproduce or scale
+  this.
+- **Investigate the "identical opening move" finding properly.** Stage
+  3 noticed isolated agents opened with the exact same price sequence
+  (round 0 at $3.00, round 1 at $3.50) in 16 out of 16 runs under the
+  old model, a striking result that was never followed up on after the
+  model switch. Worth checking whether this holds under the current
+  model and what it implies about how much genuine randomness
+  temperature sampling actually provides on a fresh prompt.
